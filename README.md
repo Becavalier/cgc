@@ -1,2 +1,3 @@
-# toy-gc
-A toy GC just for demonstration.
+# cgc
+An experimental Garbage Collector for C language.
+
