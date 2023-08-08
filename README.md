@@ -13,7 +13,7 @@ As an experimental GC for C, actually, there are a lot of limitations I found du
 
 #### Platform
 
-This is only for Unix-like x86-64 systems. 
+This is only for Unix-like x86-64 systems. The way of memory scan is based on some certain x86-64 assembly code (.e.g pushfq) and the way the program memory is organized (ELF).
 
 #### Conservative
 
