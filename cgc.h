@@ -3,16 +3,23 @@
 
 #include <stdint.h>
 #include <unistd.h>
+#include <stdio.h>
 #include <stdbool.h>
 
-#define UNTAG(p) (((uint64_t) (p)) & 0xfffffffffffffffc)
+#if defined(__linux__)
+#include <assert.h>
+#endif
+
+#define vpointer_t unsigned long
+#define UNTAG_HEADER(p) (header_t*)(((vpointer_t) (p)) & 0xfffffffffffffffc)
 #define HEADER_SIZE sizeof(header_t)
 
 typedef struct header {
-  uint64_t size;  // Block size, include the header (multiple of headers) - 8 bytes.
+  size_t size;  // Block size, include the header (multiple of headers) - 8 bytes.
   struct header *next;  // Pointer to the next free block - 8 bytes.
 } header_t;
 
+static void* stack_bottom;
 static header_t *freep = NULL;   // Points to first free block of memory.
 static header_t *usedp = NULL;  // Points to first used block of memory.
 
@@ -36,13 +43,11 @@ static void insert_free_list(header_t *bp) {
     while (true) {
       if (p == NULL) break;
       if (bp > p) {
-        if (bp < p->next) {
-          if (bp + bp->size == p->next) {
-            bp->size += p->next->size;
-            bp->next = p->next->next;
-          } else {
-            bp->next = p->next;
-          }
+        if (bp + bp->size == p->next) {
+          bp->size += p->next->size;
+          bp->next = p->next->next;
+        } else {
+          bp->next = p->next;
         }
         if (p + p->size == bp) {
           p->next = bp->next;
@@ -110,15 +115,16 @@ void* gc_malloc(size_t alloc_size) {
 // Mark any items in the used list.
 static void scan_region(void* sp, void* end) {
   header_t* bp;
-  for (; sp < end; sp++) {
-    uint64_t v = *(uint64_t*) sp;
-    bp = UNTAG(usedp);
+  void* offset_end = end - sizeof(vpointer_t);
+  for (; sp <= offset_end; sp++) {
+    void* v = *(vpointer_t*)sp;
+    bp = UNTAG_HEADER(usedp);
     while (bp != NULL) {
       if (v >= bp + 1 && v < bp + 1 + bp->size) {
-        bp->next = ((uint64_t) bp->next) | 1;  // Mark the current block.
+        bp->next = (header_t*) (((vpointer_t) bp->next) | 1);  // Mark in used blocks.
         break;
       }
-      bp = UNTAG(bp->next);
+      bp = UNTAG_HEADER(bp->next);
     }
   }
 }
@@ -134,21 +140,70 @@ static void scan_region(void* sp, void* end) {
 static void scan_heap(void) {
   void* vp;
   header_t *bp, *up;
-  for (bp = UNTAG(usedp); bp != NULL; bp = UNTAG(bp->next)) {
-    if (!((uint64_t) bp->next & 1)) {  // Find the marked block.
+  for (bp = UNTAG_HEADER(usedp); bp != NULL; bp = UNTAG_HEADER(bp->next)) {
+    if (!((vpointer_t) bp->next & 1)) {  // Find the marked block.
       continue;
     }
-    for (vp = (void*) (bp + 1); vp < (bp + bp->size + 1); vp++) {
-      uint64_t v = *(uint64_t*)vp;
-      up = UNTAG(usedp);
+    void* offset_end = (void*)((size_t)(bp + bp->size + 1) - sizeof(vpointer_t));
+    for (vp = (void*) (bp + 1); vp <= offset_end; vp++) {
+      void* v = *(vpointer_t*)vp;
+      up = UNTAG_HEADER(usedp);
       while (up != NULL) {
         if (up != bp && v >= up + 1 && v < up + 1 + up->size) {
-          up->next = ((uint64_t) up->next) | 1;
+          up->next = (header_t*) (((vpointer_t) up->next) | 1);
           break;
         }
-        up = UNTAG(up->next);
+        up = UNTAG_HEADER(up->next);
       }
     }
+  }
+}
+
+void gc_init(void *sb) {
+  static bool gc_initted;
+  if (!gc_initted) {
+#if defined(__linux__)
+    FILE *statfp = fopen("/proc/self/stat", "r");
+    assert(statfp != NULL);
+    vpointer_t stack_bottom_v = 0;
+    fscanf(statfp, 
+      "%*d "  // pid.
+      "%*s "  // tcomm.
+      "%*c "  // state.
+      "%*d "  // ppid.
+      "%*d "  // pgid.
+      "%*d "  // sid.
+      "%*d "  // tty_nr.
+      "%*d "  // tty_pgrp.
+      "%*u "  // flags.
+      "%*lu "  // min_flt.
+      "%*lu "  // cmin_flt.
+      "%*lu "  // maj_flt.
+      "%*lu "  // cmaj_flt.
+      "%*lu "  // utime.
+      "%*lu "  // stime.
+      "%*ld "  // cutime.
+      "%*ld "  // cstime.
+      "%*ld "  // priority.
+      "%*ld "  // nice.
+      "%*ld "  // num_threads.
+      "%*ld "  // it_real_value.
+      "%*llu "  // start_time.
+      "%*lu "  // vsize.
+      "%*ld "  // rss.
+      "%*lu "  // rsslim.
+      "%*lu "  // start_code.
+      "%*lu "  // end_code.
+      "%lu",  // start_stack.  <-
+      &stack_bottom_v);
+    stack_bottom = (void*) stack_bottom_v;
+    fclose(statfp);
+#else
+    // "&argc" will be copied into the current stack, -
+    // and we use its address as the bottom of the program stack.
+    stack_bottom = sb;  
+#endif
+    gc_initted = true;
   }
 }
 
@@ -171,16 +226,55 @@ static void scan_heap(void) {
 
 */
 
-void GC_init(char** argv) {
-  static int initted;
-  if (initted) return;
-
-  initted = 1;
-
+void sweep(void) {
+  header_t *prevp = NULL, *tp = NULL, *p = usedp;
+  while (true) {
+    if (p == NULL) return;
+    if (!((vpointer_t) p->next & 1)) {
+      // Free the unused block.
+      tp = p;
+      p = UNTAG_HEADER(p->next);
+      insert_free_list(tp);
+      if (prevp == NULL) {
+        usedp = p;
+      } else {
+        prevp->next = p;
+      }
+    } else {
+      p->next = (header_t*)(((vpointer_t) p->next) & ~1);
+      prevp = p;
+      p = UNTAG_HEADER(p->next);
+    }
+  }
 }
 
-void GC_collect(char** argv) {
-  
+void gc_collect(void) {
+  void* stack_top;
+
+#if defined(__linux__)
+  extern char end, etext;
+  void* data_end = (void*) &end;
+  void* data_start = (void*) &etext;
+#endif
+
+  if (usedp == NULL) return;
+
+#if defined(__linux__)
+  // Scan data area (static and global variables).
+  printf("Scan .bss & .data:\n - start: %p\n - end: %p\n", data_start, data_end);
+  scan_region(data_start, data_end);
+#endif
+
+  // Scan program stack.
+  asm volatile ("movq %%rsp, %0" : "=r" (stack_top));
+  printf("Scan stack:\n - stack_top: %p\n - stack_bottom: %p\n", stack_top, stack_bottom);
+  scan_region(stack_top, stack_bottom);
+
+  // Scan program heap.
+  scan_heap();
+
+  // Sweep.
+  sweep();
 }
 
 
