@@ -20,8 +20,7 @@ typedef struct header {
 } header_t;
 
 static void* stack_bottom;
-static header_t *freep = NULL;   // Points to first free block of memory.
-static header_t *usedp = NULL;  // Points to first used block of memory.
+static header_t *freep = NULL, *usedp = NULL;   // Points to first free/used block of memory.
 
 // Scan the free list and look for a place to put the block at.
 static void insert_free_list(header_t *bp) {
@@ -265,10 +264,14 @@ void gc_collect(void) {
   scan_region(data_start, data_end);
 #endif
 
-  // Scan program stack.
-  asm volatile ("movq %%rsp, %0" : "=r" (stack_top));
+  // Scan program stack (include GPRs).
   printf("Scan stack:\n - stack_top: %p\n - stack_bottom: %p\n", stack_top, stack_bottom);
+  asm volatile (
+    "pushfq\n\t" 
+    "movq %%rsp, %0" 
+    : "=r" (stack_top));
   scan_region(stack_top, stack_bottom);
+  asm volatile ("popfq");
 
   // Scan program heap.
   scan_heap();
