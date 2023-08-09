@@ -30,3 +30,10 @@ As a "Stop-the-world" GC, usually, we can decide the timing to run the GC based 
 #### Concurrent
 
 This GC implementation doesn't support multi-threading, because it uses global static variables which are shared among all the threads, and also the system interface "sbrk" is not reentrant. Thus, re-call the GC collection method in the middle of the previous GC collection may cause undefined behavior.
+
+
+### Notes
+
+For other advanced programming languages which have runtime, they could have boxed-value for a better GC implementation. Boxed values could be referenced and managed directly by GC, and by replacing the arbitrary memory allocation with primitive boxed-value creation, the GC could track all the object values accurately (.e.g all the available values being used are on the runtime stack, and we don't need to go through the bare memory but instead iterating the individual objects on the stack). Please refer below for this way:
+
+![Arch](https://github.com/Becavalier/cgc/blob/main/assets/arch.png?raw=true)
